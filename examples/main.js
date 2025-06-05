@@ -1,19 +1,26 @@
-
 import * as THREE           from 'three';
 import { GUI              } from '../node_modules/three/examples/jsm/libs/lil-gui.module.min.js';
 import { OrbitControls    } from '../node_modules/three/examples/jsm/controls/OrbitControls.js';
 import { DragStateManager } from './utils/DragStateManager.js';
 import { setupGUI, downloadExampleScenesFolder, loadSceneFromURL, getPosition, getQuaternion, toMujocoPos, standardNormal } from './mujocoUtils.js';
+import { LocomotionController } from './locomotionController.js';
+import { createLivingRoomEnvironment } from './gltfLoader.js';
 import   load_mujoco        from '../dist/mujoco_wasm.js';
 
 // Load the MuJoCo Module
 const mujoco = await load_mujoco();
 
+// Get scene from URL or use default
+let urlParams = new URLSearchParams(window.location.search);
+var initialScene = urlParams.get('scene') || "unitree_go1/scene.xml";
+console.log("Initial scene set to:", initialScene);
+
 // Set up Emscripten's Virtual File System
-var initialScene = "humanoid.xml";
 mujoco.FS.mkdir('/working');
 mujoco.FS.mount(mujoco.MEMFS, { root: '.' }, '/working');
-mujoco.FS.writeFile("/working/" + initialScene, await(await fetch("./examples/scenes/" + initialScene)).text());
+
+// Download all example files first
+await downloadExampleScenesFolder(mujoco);
 
 export class MuJoCoDemo {
   constructor() {
@@ -23,6 +30,12 @@ export class MuJoCoDemo {
     this.model      = new mujoco.Model("/working/" + initialScene);
     this.state      = new mujoco.State(this.model);
     this.simulation = new mujoco.Simulation(this.model, this.state);
+    
+    // Create locomotion controller
+    this.locomotionController = null;
+    
+    // Living room environment flag
+    this.livingRoomEnabled = false;
 
     // Define Random State Variables
     this.params = { scene: initialScene, paused: false, help: false, ctrlnoiserate: 0.0, ctrlnoisestd: 0.0, keyframeNumber: 0 };
@@ -72,15 +85,51 @@ export class MuJoCoDemo {
 
     // Initialize the Drag State Manager.
     this.dragStateManager = new DragStateManager(this.scene, this.renderer, this.camera, this.container.parentElement, this.controls);
+    
+    // Add keyboard controls for locomotion
+    document.addEventListener('keydown', this.handleKeyDown.bind(this));
+    document.addEventListener('keyup', this.handleKeyUp.bind(this));
   }
 
   async init() {
-    // Download the the examples to MuJoCo's virtual file system
-    await downloadExampleScenesFolder(mujoco);
-
     // Initialize the three.js Scene using the .xml Model in initialScene
+    console.log("Initializing scene:", initialScene);
     [this.model, this.state, this.simulation, this.bodies, this.lights] =  
       await loadSceneFromURL(mujoco, initialScene, this);
+    console.log("Scene loaded:", initialScene);
+
+    // Initialize the locomotion controller if we're using the Go1 robot
+    if (initialScene.includes("unitree_go1") || initialScene === "living_room.xml") {
+      console.log("Initializing locomotion controller for:", initialScene);
+      this.locomotionController = new LocomotionController(this.simulation);
+      this.params.enableLocomotion = true; // Add parameter to control locomotion
+      this.params.locomotionSpeed = 0.5;   // Default speed
+      this.params.locomotionDirX = 1.0;    // Default direction (forward)
+      this.params.locomotionDirY = 0.0;
+    } else {
+      this.locomotionController = null;
+      this.params.enableLocomotion = false;
+    }
+    
+    // Add living room environment option
+    this.params.livingRoomEnabled = false;
+    this.params.useLivingRoomScene = initialScene === "living_room.xml";
+    
+    // Load GLTF furniture models if living room environment is enabled
+    if (this.params.useLivingRoomScene) {
+      console.log("Living room scene detected, setting up environment");
+      this.livingRoomEnabled = true;
+      this.params.livingRoomEnabled = true;
+      
+      // Load furniture models
+      try {
+        console.log("Attempting to load furniture models");
+        await createLivingRoomEnvironment(this.scene);
+        console.log("Living room environment loaded successfully");
+      } catch (error) {
+        console.error("Failed to load living room environment:", error);
+      }
+    }
 
     this.gui = new GUI();
     setupGUI(this);
@@ -100,38 +149,66 @@ export class MuJoCoDemo {
       if (timeMS - this.mujoco_time > 35.0) { this.mujoco_time = timeMS; }
       while (this.mujoco_time < timeMS) {
 
-        // Jitter the control state with gaussian random noise
-        if (this.params["ctrlnoisestd"] > 0.0) {
-          let rate  = Math.exp(-timestep / Math.max(1e-10, this.params["ctrlnoiserate"]));
-          let scale = this.params["ctrlnoisestd"] * Math.sqrt(1 - rate * rate);
-          let currentCtrl = this.simulation.ctrl;
-          for (let i = 0; i < currentCtrl.length; i++) {
-            currentCtrl[i] = rate * currentCtrl[i] + scale * standardNormal();
-            this.params["Actuator " + i] = currentCtrl[i];
+        // Update locomotion controller if enabled
+        if (this.locomotionController && this.params.enableLocomotion) {
+          this.locomotionController.setDirection(
+            this.params.locomotionDirX,
+            this.params.locomotionDirY
+          );
+          this.locomotionController.setSpeed(this.params.locomotionSpeed);
+          this.locomotionController.update(timestep);
+        }
+        // Otherwise use the standard control approach
+        else {
+          // Jitter the control state with gaussian random noise
+          if (this.params["ctrlnoisestd"] > 0.0) {
+            let rate  = Math.exp(-timestep / Math.max(1e-10, this.params["ctrlnoiserate"]));
+            let scale = this.params["ctrlnoisestd"] * Math.sqrt(1 - rate * rate);
+            let currentCtrl = this.simulation.ctrl;
+            for (let i = 0; i < currentCtrl.length; i++) {
+              currentCtrl[i] = rate * currentCtrl[i] + scale * standardNormal();
+              this.params["Actuator " + i] = currentCtrl[i];
+            }
           }
         }
 
         // Clear old perturbations, apply new ones.
-        for (let i = 0; i < this.simulation.qfrc_applied.length; i++) { this.simulation.qfrc_applied[i] = 0.0; }
+        if (this.simulation.qfrc_applied && this.simulation.qfrc_applied.length > 0) {
+          try {
+            for (let i = 0; i < this.simulation.qfrc_applied.length; i++) { 
+              this.simulation.qfrc_applied[i] = 0.0; 
+            }
+          } catch (e) {
+            console.error("Error clearing perturbations:", e);
+          }
+        }
+        
         let dragged = this.dragStateManager.physicsObject;
         if (dragged && dragged.bodyID) {
-          for (let b = 0; b < this.model.nbody; b++) {
-            if (this.bodies[b]) {
-              getPosition  (this.simulation.xpos , b, this.bodies[b].position);
-              getQuaternion(this.simulation.xquat, b, this.bodies[b].quaternion);
-              this.bodies[b].updateWorldMatrix();
+          try {
+            for (let b = 0; b < this.model.nbody; b++) {
+              if (this.bodies[b]) {
+                getPosition  (this.simulation.xpos , b, this.bodies[b].position);
+                getQuaternion(this.simulation.xquat, b, this.bodies[b].quaternion);
+                this.bodies[b].updateWorldMatrix();
+              }
             }
+            let bodyID = dragged.bodyID;
+            this.dragStateManager.update(); // Update the world-space force origin
+            let force = toMujocoPos(this.dragStateManager.currentWorld.clone().sub(this.dragStateManager.worldHit).multiplyScalar(this.model.body_mass[bodyID] * 250));
+            let point = toMujocoPos(this.dragStateManager.worldHit.clone());
+            this.simulation.applyForce(force.x, force.y, force.z, 0, 0, 0, point.x, point.y, point.z, bodyID);
+          } catch (e) {
+            console.error("Error applying force:", e);
           }
-          let bodyID = dragged.bodyID;
-          this.dragStateManager.update(); // Update the world-space force origin
-          let force = toMujocoPos(this.dragStateManager.currentWorld.clone().sub(this.dragStateManager.worldHit).multiplyScalar(this.model.body_mass[bodyID] * 250));
-          let point = toMujocoPos(this.dragStateManager.worldHit.clone());
-          this.simulation.applyForce(force.x, force.y, force.z, 0, 0, 0, point.x, point.y, point.z, bodyID);
-
           // TODO: Apply pose perturbations (mocap bodies only).
         }
 
-        this.simulation.step();
+        try {
+          this.simulation.step();
+        } catch (e) {
+          console.error("Error stepping simulation:", e);
+        }
 
         this.mujoco_time += timestep * 1000.0;
       }
@@ -141,63 +218,26 @@ export class MuJoCoDemo {
       let dragged = this.dragStateManager.physicsObject;
       if (dragged && dragged.bodyID) {
         let b = dragged.bodyID;
-        getPosition  (this.simulation.xpos , b, this.tmpVec , false); // Get raw coordinate from MuJoCo
-        getQuaternion(this.simulation.xquat, b, this.tmpQuat, false); // Get raw coordinate from MuJoCo
+        // Skip ahead when paused.
+        if (this.model.body_jntnum[b] == 0 || this.model.body_jntnum[b] == 6) {
+          this.dragStateManager.update(); // Update the world-space force origin
 
-        let offset = toMujocoPos(this.dragStateManager.currentWorld.clone()
-          .sub(this.dragStateManager.worldHit).multiplyScalar(0.3));
-        if (this.model.body_mocapid[b] >= 0) {
-          // Set the root body's mocap position...
-          console.log("Trying to move mocap body", b);
-          let addr = this.model.body_mocapid[b] * 3;
-          let pos  = this.simulation.mocap_pos;
-          pos[addr+0] += offset.x;
-          pos[addr+1] += offset.y;
-          pos[addr+2] += offset.z;
-        } else {
-          // Set the root body's position directly...
-          let root = this.model.body_rootid[b];
-          let addr = this.model.jnt_qposadr[this.model.body_jntadr[root]];
-          let pos  = this.simulation.qpos;
-          pos[addr+0] += offset.x;
-          pos[addr+1] += offset.y;
-          pos[addr+2] += offset.z;
+          let curPos = new THREE.Vector3();
+          let curRot = new THREE.Quaternion();
+          getPosition  (this.simulation.xpos, b, curPos);
+          getQuaternion(this.simulation.xquat, b, curRot);
 
-          //// Save the original root body position
-          //let x  = pos[addr + 0], y  = pos[addr + 1], z  = pos[addr + 2];
-          //let xq = pos[addr + 3], yq = pos[addr + 4], zq = pos[addr + 5], wq = pos[addr + 6];
+          let posDiff = this.dragStateManager.currentWorld.clone().sub(this.dragStateManager.worldHit);
+          let newPos = curPos.clone().add(posDiff);
 
-          //// Clear old perturbations, apply new ones.
-          //for (let i = 0; i < this.simulation.qfrc_applied().length; i++) { this.simulation.qfrc_applied()[i] = 0.0; }
-          //for (let bi = 0; bi < this.model.nbody(); bi++) {
-          //  if (this.bodies[b]) {
-          //    getPosition  (this.simulation.xpos (), bi, this.bodies[bi].position);
-          //    getQuaternion(this.simulation.xquat(), bi, this.bodies[bi].quaternion);
-          //    this.bodies[bi].updateWorldMatrix();
-          //  }
-          //}
-          ////dragStateManager.update(); // Update the world-space force origin
-          //let force = toMujocoPos(this.dragStateManager.currentWorld.clone()
-          //  .sub(this.dragStateManager.worldHit).multiplyScalar(this.model.body_mass()[b] * 0.01));
-          //let point = toMujocoPos(this.dragStateManager.worldHit.clone());
-          //// This force is dumped into xrfc_applied
-          //this.simulation.applyForce(force.x, force.y, force.z, 0, 0, 0, point.x, point.y, point.z, b);
-          //this.simulation.integratePos(this.simulation.qpos(), this.simulation.qfrc_applied(), 1);
-
-          //// Add extra drag to the root body
-          //pos[addr + 0] = x  + (pos[addr + 0] - x ) * 0.1;
-          //pos[addr + 1] = y  + (pos[addr + 1] - y ) * 0.1;
-          //pos[addr + 2] = z  + (pos[addr + 2] - z ) * 0.1;
-          //pos[addr + 3] = xq + (pos[addr + 3] - xq) * 0.1;
-          //pos[addr + 4] = yq + (pos[addr + 4] - yq) * 0.1;
-          //pos[addr + 5] = zq + (pos[addr + 5] - zq) * 0.1;
-          //pos[addr + 6] = wq + (pos[addr + 6] - wq) * 0.1;
-
-
+          setPositionAndUpdateParent(this.simulation, b, newPos);
+          if (this.model.body_jntnum[b] == 6) {
+            this.simulation.forward();
+          }
         }
       }
-
-      this.simulation.forward();
+      // Force the model to update in the renderer.
+      this.mujoco_time = 0;
     }
 
     // Update body transforms.
@@ -252,6 +292,47 @@ export class MuJoCoDemo {
 
     // Render!
     this.renderer.render( this.scene, this.camera );
+  }
+
+  handleKeyDown(event) {
+    if (!this.locomotionController || !this.params.enableLocomotion) return;
+    
+    // Arrow keys for direction
+    switch (event.code) {
+      case 'ArrowUp':
+        this.params.locomotionDirX = 1.0;
+        this.params.locomotionDirY = 0.0;
+        break;
+      case 'ArrowDown':
+        this.params.locomotionDirX = -1.0;
+        this.params.locomotionDirY = 0.0;
+        break;
+      case 'ArrowLeft':
+        this.params.locomotionDirX = 0.0;
+        this.params.locomotionDirY = 1.0;
+        break;
+      case 'ArrowRight':
+        this.params.locomotionDirX = 0.0;
+        this.params.locomotionDirY = -1.0;
+        break;
+      // Speed control
+      case 'KeyQ':
+        this.params.locomotionSpeed = Math.max(0, this.params.locomotionSpeed - 0.1);
+        break;
+      case 'KeyE':
+        this.params.locomotionSpeed = Math.min(1, this.params.locomotionSpeed + 0.1);
+        break;
+    }
+  }
+  
+  handleKeyUp(event) {
+    if (!this.locomotionController || !this.params.enableLocomotion) return;
+    
+    // Stop movement when keys are released
+    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.code)) {
+      this.params.locomotionDirX = 0.0;
+      this.params.locomotionDirY = 0.0;
+    }
   }
 }
 

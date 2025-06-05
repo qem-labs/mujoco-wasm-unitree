@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { Reflector  } from './utils/Reflector.js';
 import { MuJoCoDemo } from './main.js';
+import { createLivingRoomEnvironment } from './gltfLoader.js';
 
 export async function reloadFunc() {
   // Delete the old scene and load the new scene
@@ -26,11 +27,66 @@ export function setupGUI(parentContext) {
 
   // Add scene selection dropdown.
   let reload = reloadFunc.bind(parentContext);
+  
+  // Add living room direct load button
+  parentContext.gui.add({
+    loadLivingRoom: function() {
+      console.log("Loading living room scene directly");
+      window.location.href = window.location.pathname + "?scene=living_room.xml";
+    }
+  }, 'loadLivingRoom').name('Load Living Room');
+
   parentContext.gui.add(parentContext.params, 'scene', {
-    "Humanoid": "humanoid.xml", "Cassie": "agility_cassie/scene.xml",
-    "Hammock": "hammock.xml", "Balloons": "balloons.xml", "Hand": "shadow_hand/scene_right.xml",
-    "Flag": "flag.xml", "Mug": "mug.xml", "Tendon": "model_with_tendon.xml"
+    "Unitree Go1": "unitree_go1/scene.xml"
   }).name('Example Scene').onChange(reload);
+
+  // Add locomotion controls if available
+  if (parentContext.locomotionController) {
+    let locomotionFolder = parentContext.gui.addFolder("Locomotion Controls");
+    
+    // Enable/disable locomotion
+    locomotionFolder.add(parentContext.params, 'enableLocomotion').name('Enable Locomotion');
+    
+    // Speed control
+    locomotionFolder.add(parentContext.params, 'locomotionSpeed', 0, 1, 0.05).name('Speed');
+    
+    // Direction controls
+    locomotionFolder.add(parentContext.params, 'locomotionDirX', -1, 1, 0.1).name('Direction X');
+    locomotionFolder.add(parentContext.params, 'locomotionDirY', -1, 1, 0.1).name('Direction Y');
+    
+    // Button to reset to default pose
+    locomotionFolder.add({reset: () => { 
+      if (parentContext.locomotionController) {
+        parentContext.locomotionController.reset();
+      }
+    }}, 'reset').name('Reset Pose');
+    
+    locomotionFolder.open();
+  }
+  
+  // Add living room environment controls if available
+  if (parentContext.livingRoomEnabled || parentContext.params.useLivingRoomScene) {
+    let environmentFolder = parentContext.gui.addFolder("Environment Controls");
+    
+    // Enable/disable living room
+    environmentFolder.add(parentContext.params, 'livingRoomEnabled').name('Enable Living Room').onChange((value) => {
+      if (value) {
+        // Create furniture if not already created
+        if (!parentContext.furnitureCreated) {
+          createLivingRoomEnvironment(parentContext.scene)
+            .then(() => { 
+              parentContext.furnitureCreated = true;
+              console.log("Living room furniture added");
+            })
+            .catch(error => console.error("Failed to load furniture:", error));
+        }
+      } else {
+        // TODO: Hide furniture models
+      }
+    });
+    
+    environmentFolder.open();
+  }
 
   // Add a help menu.
   // Parameters:
@@ -266,282 +322,315 @@ export function setupGUI(parentContext) {
  * @param {MuJoCoDemo} parent The three.js Scene Object to add the MuJoCo model elements to
  */
 export async function loadSceneFromURL(mujoco, filename, parent) {
-    // Free the old simulation.
-    if (parent.simulation != null) {
-      parent.simulation.free();
-      parent.model      = null;
-      parent.state      = null;
-      parent.simulation = null;
-    }
-
-    // Load in the state from XML.
-    parent.model       = mujoco.Model.load_from_xml("/working/"+filename);
-    parent.state       = new mujoco.State(parent.model);
-    parent.simulation  = new mujoco.Simulation(parent.model, parent.state);
-
-    let model = parent.model;
-    let state = parent.state;
-    let simulation = parent.simulation;
-
-    // Decode the null-terminated string names.
-    let textDecoder = new TextDecoder("utf-8");
-    let names_array = new Uint8Array(model.names);
-    let fullString = textDecoder.decode(model.names);
-    let names = fullString.split(textDecoder.decode(new ArrayBuffer(1)));
-
-    // Create the root object.
-    let mujocoRoot = new THREE.Group();
-    mujocoRoot.name = "MuJoCo Root"
-    parent.scene.add(mujocoRoot);
-
-    /** @type {Object.<number, THREE.Group>} */
-    let bodies = {};
-    /** @type {Object.<number, THREE.BufferGeometry>} */
-    let meshes = {};
-    /** @type {THREE.Light[]} */
-    let lights = [];
-
-    // Default material definition.
-    let material = new THREE.MeshPhysicalMaterial();
-    material.color = new THREE.Color(1, 1, 1);
-
-    // Loop through the MuJoCo geoms and recreate them in three.js.
-    for (let g = 0; g < model.ngeom; g++) {
-      // Only visualize geom groups up to 2 (same default behavior as simulate).
-      if (!(model.geom_group[g] < 3)) { continue; }
-
-      // Get the body ID and type of the geom.
-      let b = model.geom_bodyid[g];
-      let type = model.geom_type[g];
-      let size = [
-        model.geom_size[(g*3) + 0],
-        model.geom_size[(g*3) + 1],
-        model.geom_size[(g*3) + 2]
-      ];
-
-      // Create the body if it doesn't exist.
-      if (!(b in bodies)) {
-        bodies[b] = new THREE.Group();
+    try {
+        console.log("Loading scene from URL:", filename);
         
-        let start_idx = model.name_bodyadr[b];
-        let end_idx = start_idx;
-        while (end_idx < names_array.length && names_array[end_idx] !== 0) {
-          end_idx++;
+        // Free the old simulation.
+        if (parent.simulation != null) {
+          parent.simulation.free();
+          parent.model      = null;
+          parent.state      = null;
+          parent.simulation = null;
         }
-        let name_buffer = names_array.subarray(start_idx, end_idx);
-        bodies[b].name = textDecoder.decode(name_buffer);
+    
+        // Load in the state from XML.
+        parent.model       = mujoco.Model.load_from_xml("/working/"+filename);
+        parent.state       = new mujoco.State(parent.model);
+        parent.simulation  = new mujoco.Simulation(parent.model, parent.state);
+    
+        let model = parent.model;
+        let state = parent.state;
+        let simulation = parent.simulation;
+    
+        // Decode the null-terminated string names.
+        let textDecoder = new TextDecoder("utf-8");
         
-        bodies[b].bodyID = b;
-        bodies[b].has_custom_mesh = false;
-      }
-
-      // Set the default geometry. In MuJoCo, this is a sphere.
-      let geometry = new THREE.SphereGeometry(size[0] * 0.5);
-      if (type == mujoco.mjtGeom.mjGEOM_PLANE.value) {
-        // Special handling for plane later.
-      } else if (type == mujoco.mjtGeom.mjGEOM_HFIELD.value) {
-        // TODO: Implement this.
-      } else if (type == mujoco.mjtGeom.mjGEOM_SPHERE.value) {
-        geometry = new THREE.SphereGeometry(size[0]);
-      } else if (type == mujoco.mjtGeom.mjGEOM_CAPSULE.value) {
-        geometry = new THREE.CapsuleGeometry(size[0], size[1] * 2.0, 20, 20);
-      } else if (type == mujoco.mjtGeom.mjGEOM_ELLIPSOID.value) {
-        geometry = new THREE.SphereGeometry(1); // Stretch this below
-      } else if (type == mujoco.mjtGeom.mjGEOM_CYLINDER.value) {
-        geometry = new THREE.CylinderGeometry(size[0], size[0], size[1] * 2.0);
-      } else if (type == mujoco.mjtGeom.mjGEOM_BOX.value) {
-        geometry = new THREE.BoxGeometry(size[0] * 2.0, size[2] * 2.0, size[1] * 2.0);
-      } else if (type == mujoco.mjtGeom.mjGEOM_MESH.value) {
-        let meshID = model.geom_dataid[g];
-
-        if (!(meshID in meshes)) {
-          geometry = new THREE.BufferGeometry(); // TODO: Populate the Buffer Geometry with Generic Mesh Data
-
-          let vertex_buffer = model.mesh_vert.subarray(
-             model.mesh_vertadr[meshID] * 3,
-            (model.mesh_vertadr[meshID]  + model.mesh_vertnum[meshID]) * 3);
-          for (let v = 0; v < vertex_buffer.length; v+=3){
-            //vertex_buffer[v + 0] =  vertex_buffer[v + 0];
-            let temp             =  vertex_buffer[v + 1];
-            vertex_buffer[v + 1] =  vertex_buffer[v + 2];
-            vertex_buffer[v + 2] = -temp;
-          }
-
-          let normal_buffer = model.mesh_normal.subarray(
-             model.mesh_vertadr[meshID] * 3,
-            (model.mesh_vertadr[meshID]  + model.mesh_vertnum[meshID]) * 3);
-          for (let v = 0; v < normal_buffer.length; v+=3){
-            //normal_buffer[v + 0] =  normal_buffer[v + 0];
-            let temp             =  normal_buffer[v + 1];
-            normal_buffer[v + 1] =  normal_buffer[v + 2];
-            normal_buffer[v + 2] = -temp;
-          }
-
-          let uv_buffer = model.mesh_texcoord.subarray(
-             model.mesh_texcoordadr[meshID] * 2,
-            (model.mesh_texcoordadr[meshID]  + model.mesh_vertnum[meshID]) * 2);
-          let triangle_buffer = model.mesh_face.subarray(
-             model.mesh_faceadr[meshID] * 3,
-            (model.mesh_faceadr[meshID]  + model.mesh_facenum[meshID]) * 3);
-          geometry.setAttribute("position", new THREE.BufferAttribute(vertex_buffer, 3));
-          geometry.setAttribute("normal"  , new THREE.BufferAttribute(normal_buffer, 3));
-          geometry.setAttribute("uv"      , new THREE.BufferAttribute(    uv_buffer, 2));
-          geometry.setIndex    (Array.from(triangle_buffer));
-          meshes[meshID] = geometry;
-        } else {
-          geometry = meshes[meshID];
+        // Verify names array is valid
+        if (!model.names || model.names.byteLength === 0) {
+            console.error("Error: model.names is invalid or empty");
+            throw new Error("Invalid model.names array");
         }
-
-        bodies[b].has_custom_mesh = true;
-      }
-      // Done with geometry creation.
-
-      // Set the Material Properties of incoming bodies
-      let texture = undefined;
-      let color = [
-        model.geom_rgba[(g * 4) + 0],
-        model.geom_rgba[(g * 4) + 1],
-        model.geom_rgba[(g * 4) + 2],
-        model.geom_rgba[(g * 4) + 3]];
-      if (model.geom_matid[g] != -1) {
-        let matId = model.geom_matid[g];
-        color = [
-          model.mat_rgba[(matId * 4) + 0],
-          model.mat_rgba[(matId * 4) + 1],
-          model.mat_rgba[(matId * 4) + 2],
-          model.mat_rgba[(matId * 4) + 3]];
-
-        // Construct Texture from model.tex_rgb
-        texture = undefined;
-        let texId = model.mat_texid[matId];
-        if (texId != -1) {
-          let width    = model.tex_width [texId];
-          let height   = model.tex_height[texId];
-          let offset   = model.tex_adr   [texId];
-          let rgbArray = model.tex_rgb   ;
-          let rgbaArray = new Uint8Array(width * height * 4);
-          for (let p = 0; p < width * height; p++){
-            rgbaArray[(p * 4) + 0] = rgbArray[offset + ((p * 3) + 0)];
-            rgbaArray[(p * 4) + 1] = rgbArray[offset + ((p * 3) + 1)];
-            rgbaArray[(p * 4) + 2] = rgbArray[offset + ((p * 3) + 2)];
-            rgbaArray[(p * 4) + 3] = 1.0;
+        
+        let names_array = new Uint8Array(model.names);
+        let fullString = textDecoder.decode(model.names);
+        let names = fullString.split(textDecoder.decode(new ArrayBuffer(1)));
+    
+        // Create the root object.
+        let mujocoRoot = new THREE.Group();
+        mujocoRoot.name = "MuJoCo Root"
+        parent.scene.add(mujocoRoot);
+    
+        /** @type {Object.<number, THREE.Group>} */
+        let bodies = {};
+        /** @type {Object.<number, THREE.BufferGeometry>} */
+        let meshes = {};
+        /** @type {THREE.Light[]} */
+        let lights = [];
+    
+        // Default material definition.
+        let material = new THREE.MeshPhysicalMaterial();
+        material.color = new THREE.Color(1, 1, 1);
+    
+        // Loop through the MuJoCo geoms and recreate them in three.js.
+        for (let g = 0; g < model.ngeom; g++) {
+          // Only visualize geom groups up to 2 (same default behavior as simulate).
+          if (!(model.geom_group[g] < 3)) { continue; }
+    
+          // Get the body ID and type of the geom.
+          let b = model.geom_bodyid[g];
+          let type = model.geom_type[g];
+          let size = [
+            model.geom_size[(g*3) + 0],
+            model.geom_size[(g*3) + 1],
+            model.geom_size[(g*3) + 2]
+          ];
+    
+          // Create the body if it doesn't exist.
+          if (!(b in bodies)) {
+            try {
+                bodies[b] = new THREE.Group();
+                
+                let start_idx = model.name_bodyadr[b];
+                let end_idx = start_idx;
+                while (end_idx < names_array.length && names_array[end_idx] !== 0) {
+                  end_idx++;
+                }
+                let name_buffer = names_array.subarray(start_idx, end_idx);
+                bodies[b].name = textDecoder.decode(name_buffer);
+                
+                bodies[b].bodyID = b;
+                bodies[b].has_custom_mesh = false;
+            } catch (e) {
+                console.error("Error creating body", b, ":", e);
+                bodies[b] = new THREE.Group();
+                bodies[b].name = "Body_" + b;
+                bodies[b].bodyID = b;
+                bodies[b].has_custom_mesh = false;
+            }
           }
-          texture = new THREE.DataTexture(rgbaArray, width, height, THREE.RGBAFormat, THREE.UnsignedByteType);
-          if (texId == 2) {
-            texture.repeat = new THREE.Vector2(50, 50);
-            texture.wrapS = THREE.RepeatWrapping;
-            texture.wrapT = THREE.RepeatWrapping;
+
+          // Set the default geometry. In MuJoCo, this is a sphere.
+          let geometry = new THREE.SphereGeometry(size[0] * 0.5);
+          if (type == mujoco.mjtGeom.mjGEOM_PLANE.value) {
+            // Special handling for plane later.
+          } else if (type == mujoco.mjtGeom.mjGEOM_HFIELD.value) {
+            // TODO: Implement this.
+          } else if (type == mujoco.mjtGeom.mjGEOM_SPHERE.value) {
+            geometry = new THREE.SphereGeometry(size[0]);
+          } else if (type == mujoco.mjtGeom.mjGEOM_CAPSULE.value) {
+            geometry = new THREE.CapsuleGeometry(size[0], size[1] * 2.0, 20, 20);
+          } else if (type == mujoco.mjtGeom.mjGEOM_ELLIPSOID.value) {
+            geometry = new THREE.SphereGeometry(1); // Stretch this below
+          } else if (type == mujoco.mjtGeom.mjGEOM_CYLINDER.value) {
+            geometry = new THREE.CylinderGeometry(size[0], size[0], size[1] * 2.0);
+          } else if (type == mujoco.mjtGeom.mjGEOM_BOX.value) {
+            geometry = new THREE.BoxGeometry(size[0] * 2.0, size[2] * 2.0, size[1] * 2.0);
+          } else if (type == mujoco.mjtGeom.mjGEOM_MESH.value) {
+            let meshID = model.geom_dataid[g];
+
+            if (!(meshID in meshes)) {
+              geometry = new THREE.BufferGeometry(); // TODO: Populate the Buffer Geometry with Generic Mesh Data
+
+              let vertex_buffer = model.mesh_vert.subarray(
+                 model.mesh_vertadr[meshID] * 3,
+                (model.mesh_vertadr[meshID]  + model.mesh_vertnum[meshID]) * 3);
+              for (let v = 0; v < vertex_buffer.length; v+=3){
+                //vertex_buffer[v + 0] =  vertex_buffer[v + 0];
+                let temp             =  vertex_buffer[v + 1];
+                vertex_buffer[v + 1] =  vertex_buffer[v + 2];
+                vertex_buffer[v + 2] = -temp;
+              }
+
+              let normal_buffer = model.mesh_normal.subarray(
+                 model.mesh_vertadr[meshID] * 3,
+                (model.mesh_vertadr[meshID]  + model.mesh_vertnum[meshID]) * 3);
+              for (let v = 0; v < normal_buffer.length; v+=3){
+                //normal_buffer[v + 0] =  normal_buffer[v + 0];
+                let temp             =  normal_buffer[v + 1];
+                normal_buffer[v + 1] =  normal_buffer[v + 2];
+                normal_buffer[v + 2] = -temp;
+              }
+
+              let uv_buffer = model.mesh_texcoord.subarray(
+                 model.mesh_texcoordadr[meshID] * 2,
+                (model.mesh_texcoordadr[meshID]  + model.mesh_vertnum[meshID]) * 2);
+              let triangle_buffer = model.mesh_face.subarray(
+                 model.mesh_faceadr[meshID] * 3,
+                (model.mesh_faceadr[meshID]  + model.mesh_facenum[meshID]) * 3);
+              geometry.setAttribute("position", new THREE.BufferAttribute(vertex_buffer, 3));
+              geometry.setAttribute("normal"  , new THREE.BufferAttribute(normal_buffer, 3));
+              geometry.setAttribute("uv"      , new THREE.BufferAttribute(    uv_buffer, 2));
+              geometry.setIndex    (Array.from(triangle_buffer));
+              meshes[meshID] = geometry;
+            } else {
+              geometry = meshes[meshID];
+            }
+
+            bodies[b].has_custom_mesh = true;
+          }
+          // Done with geometry creation.
+
+          // Set the Material Properties of incoming bodies
+          let texture = undefined;
+          let color = [
+            model.geom_rgba[(g * 4) + 0],
+            model.geom_rgba[(g * 4) + 1],
+            model.geom_rgba[(g * 4) + 2],
+            model.geom_rgba[(g * 4) + 3]];
+          if (model.geom_matid[g] != -1) {
+            let matId = model.geom_matid[g];
+            color = [
+              model.mat_rgba[(matId * 4) + 0],
+              model.mat_rgba[(matId * 4) + 1],
+              model.mat_rgba[(matId * 4) + 2],
+              model.mat_rgba[(matId * 4) + 3]];
+
+            // Construct Texture from model.tex_rgb
+            texture = undefined;
+            let texId = model.mat_texid[matId];
+            if (texId != -1) {
+              let width    = model.tex_width [texId];
+              let height   = model.tex_height[texId];
+              let offset   = model.tex_adr   [texId];
+              let rgbArray = model.tex_rgb   ;
+              let rgbaArray = new Uint8Array(width * height * 4);
+              for (let p = 0; p < width * height; p++){
+                rgbaArray[(p * 4) + 0] = rgbArray[offset + ((p * 3) + 0)];
+                rgbaArray[(p * 4) + 1] = rgbArray[offset + ((p * 3) + 1)];
+                rgbaArray[(p * 4) + 2] = rgbArray[offset + ((p * 3) + 2)];
+                rgbaArray[(p * 4) + 3] = 1.0;
+              }
+              texture = new THREE.DataTexture(rgbaArray, width, height, THREE.RGBAFormat, THREE.UnsignedByteType);
+              if (texId == 2) {
+                texture.repeat = new THREE.Vector2(50, 50);
+                texture.wrapS = THREE.RepeatWrapping;
+                texture.wrapT = THREE.RepeatWrapping;
+              } else {
+                texture.repeat = new THREE.Vector2(1, 1);
+                texture.wrapS = THREE.RepeatWrapping;
+                texture.wrapT = THREE.RepeatWrapping;
+              }
+
+              texture.needsUpdate = true;
+            }
+          }
+
+          if (material.color.r != color[0] ||
+              material.color.g != color[1] ||
+              material.color.b != color[2] ||
+              material.opacity != color[3] ||
+              material.map     != texture) {
+            material = new THREE.MeshPhysicalMaterial({
+              color: new THREE.Color(color[0], color[1], color[2]),
+              transparent: color[3] < 1.0,
+              opacity: color[3],
+              specularIntensity: model.geom_matid[g] != -1 ?       model.mat_specular   [model.geom_matid[g]] *0.5 : undefined,
+              reflectivity     : model.geom_matid[g] != -1 ?       model.mat_reflectance[model.geom_matid[g]] : undefined,
+              roughness        : model.geom_matid[g] != -1 ? 1.0 - model.mat_shininess  [model.geom_matid[g]] : undefined,
+              metalness        : model.geom_matid[g] != -1 ? 0.1 : undefined,
+              map              : texture
+            });
+          }
+
+          let mesh = new THREE.Mesh();
+          if (type == 0) {
+            mesh = new Reflector( new THREE.PlaneGeometry( 100, 100 ), { clipBias: 0.003,texture: texture } );
+            mesh.rotateX( - Math.PI / 2 );
           } else {
-            texture.repeat = new THREE.Vector2(1, 1);
-            texture.wrapS = THREE.RepeatWrapping;
-            texture.wrapT = THREE.RepeatWrapping;
+            mesh = new THREE.Mesh(geometry, material);
           }
 
-          texture.needsUpdate = true;
+          mesh.castShadow = g == 0 ? false : true;
+          mesh.receiveShadow = type != 7;
+          mesh.bodyID = b;
+          bodies[b].add(mesh);
+          getPosition  (model.geom_pos, g, mesh.position  );
+          if (type != 0) { getQuaternion(model.geom_quat, g, mesh.quaternion); }
+          if (type == 4) { mesh.scale.set(size[0], size[2], size[1]) } // Stretch the Ellipsoid
         }
-      }
 
-      if (material.color.r != color[0] ||
-          material.color.g != color[1] ||
-          material.color.b != color[2] ||
-          material.opacity != color[3] ||
-          material.map     != texture) {
-        material = new THREE.MeshPhysicalMaterial({
-          color: new THREE.Color(color[0], color[1], color[2]),
-          transparent: color[3] < 1.0,
-          opacity: color[3],
-          specularIntensity: model.geom_matid[g] != -1 ?       model.mat_specular   [model.geom_matid[g]] *0.5 : undefined,
-          reflectivity     : model.geom_matid[g] != -1 ?       model.mat_reflectance[model.geom_matid[g]] : undefined,
-          roughness        : model.geom_matid[g] != -1 ? 1.0 - model.mat_shininess  [model.geom_matid[g]] : undefined,
-          metalness        : model.geom_matid[g] != -1 ? 0.1 : undefined,
-          map              : texture
-        });
-      }
+        // Parse tendons.
+        let tendonMat = new THREE.MeshPhongMaterial();
+        tendonMat.color = new THREE.Color(0.8, 0.3, 0.3);
+        mujocoRoot.cylinders = new THREE.InstancedMesh(
+            new THREE.CylinderGeometry(1, 1, 1),
+            tendonMat, 1023);
+        mujocoRoot.cylinders.receiveShadow = true;
+        mujocoRoot.cylinders.castShadow    = true;
+        mujocoRoot.add(mujocoRoot.cylinders);
+        mujocoRoot.spheres = new THREE.InstancedMesh(
+            new THREE.SphereGeometry(1, 10, 10),
+            tendonMat, 1023);
+        mujocoRoot.spheres.receiveShadow = true;
+        mujocoRoot.spheres.castShadow    = true;
+        mujocoRoot.add(mujocoRoot.spheres);
 
-      let mesh = new THREE.Mesh();
-      if (type == 0) {
-        mesh = new Reflector( new THREE.PlaneGeometry( 100, 100 ), { clipBias: 0.003,texture: texture } );
-        mesh.rotateX( - Math.PI / 2 );
-      } else {
-        mesh = new THREE.Mesh(geometry, material);
-      }
+        // Parse lights.
+        for (let l = 0; l < model.nlight; l++) {
+          let light = new THREE.SpotLight();
+          if (model.light_directional[l]) {
+            light = new THREE.DirectionalLight();
+          } else {
+            light = new THREE.SpotLight();
+          }
+          light.decay = model.light_attenuation[l] * 100;
+          light.penumbra = 0.5;
+          light.castShadow = true; // default false
 
-      mesh.castShadow = g == 0 ? false : true;
-      mesh.receiveShadow = type != 7;
-      mesh.bodyID = b;
-      bodies[b].add(mesh);
-      getPosition  (model.geom_pos, g, mesh.position  );
-      if (type != 0) { getQuaternion(model.geom_quat, g, mesh.quaternion); }
-      if (type == 4) { mesh.scale.set(size[0], size[2], size[1]) } // Stretch the Ellipsoid
+          light.shadow.mapSize.width = 1024; // default
+          light.shadow.mapSize.height = 1024; // default
+          light.shadow.camera.near = 1; // default
+          light.shadow.camera.far = 10; // default
+          //bodies[model.light_bodyid()].add(light);
+          if (bodies[0]) {
+            bodies[0].add(light);
+          } else {
+            mujocoRoot.add(light);
+          }
+          lights.push(light);
+        }
+        if (model.nlight == 0) {
+          let light = new THREE.DirectionalLight();
+          mujocoRoot.add(light);
+        }
+
+        for (let b = 0; b < model.nbody; b++) {
+          //let parent_body = model.body_parentid()[b];
+          if (b == 0 || !bodies[0]) {
+            mujocoRoot.add(bodies[b]);
+          } else if(bodies[b]){
+            bodies[0].add(bodies[b]);
+          } else {
+            console.log("Body without Geometry detected; adding to bodies", b, bodies[b]);
+            bodies[b] = new THREE.Group(); bodies[b].name = names[b + 1]; bodies[b].bodyID = b; bodies[b].has_custom_mesh = false;
+            bodies[0].add(bodies[b]);
+          }
+        }
+      
+        parent.mujocoRoot = mujocoRoot;
+
+        return [model, state, simulation, bodies, lights]
+    } catch (e) {
+        console.error("Error loading scene from URL:", e);
+        return null;
     }
-
-    // Parse tendons.
-    let tendonMat = new THREE.MeshPhongMaterial();
-    tendonMat.color = new THREE.Color(0.8, 0.3, 0.3);
-    mujocoRoot.cylinders = new THREE.InstancedMesh(
-        new THREE.CylinderGeometry(1, 1, 1),
-        tendonMat, 1023);
-    mujocoRoot.cylinders.receiveShadow = true;
-    mujocoRoot.cylinders.castShadow    = true;
-    mujocoRoot.add(mujocoRoot.cylinders);
-    mujocoRoot.spheres = new THREE.InstancedMesh(
-        new THREE.SphereGeometry(1, 10, 10),
-        tendonMat, 1023);
-    mujocoRoot.spheres.receiveShadow = true;
-    mujocoRoot.spheres.castShadow    = true;
-    mujocoRoot.add(mujocoRoot.spheres);
-
-    // Parse lights.
-    for (let l = 0; l < model.nlight; l++) {
-      let light = new THREE.SpotLight();
-      if (model.light_directional[l]) {
-        light = new THREE.DirectionalLight();
-      } else {
-        light = new THREE.SpotLight();
-      }
-      light.decay = model.light_attenuation[l] * 100;
-      light.penumbra = 0.5;
-      light.castShadow = true; // default false
-
-      light.shadow.mapSize.width = 1024; // default
-      light.shadow.mapSize.height = 1024; // default
-      light.shadow.camera.near = 1; // default
-      light.shadow.camera.far = 10; // default
-      //bodies[model.light_bodyid()].add(light);
-      if (bodies[0]) {
-        bodies[0].add(light);
-      } else {
-        mujocoRoot.add(light);
-      }
-      lights.push(light);
-    }
-    if (model.nlight == 0) {
-      let light = new THREE.DirectionalLight();
-      mujocoRoot.add(light);
-    }
-
-    for (let b = 0; b < model.nbody; b++) {
-      //let parent_body = model.body_parentid()[b];
-      if (b == 0 || !bodies[0]) {
-        mujocoRoot.add(bodies[b]);
-      } else if(bodies[b]){
-        bodies[0].add(bodies[b]);
-      } else {
-        console.log("Body without Geometry detected; adding to bodies", b, bodies[b]);
-        bodies[b] = new THREE.Group(); bodies[b].name = names[b + 1]; bodies[b].bodyID = b; bodies[b].has_custom_mesh = false;
-        bodies[0].add(bodies[b]);
-      }
-    }
-  
-    parent.mujocoRoot = mujocoRoot;
-
-    return [model, state, simulation, bodies, lights]
 }
 
 /** Downloads the scenes/examples folder to MuJoCo's virtual filesystem
  * @param {mujoco} mujoco */
 export async function downloadExampleScenesFolder(mujoco) {
-  let allFiles = [
+  let allFiles = [ 
+    "living_room.xml",
+    "unitree_go1/scene.xml",
+    "unitree_go1/go1.xml",
+    "unitree_go1/go1.png",
+    "unitree_go1/assets/trunk.stl",
+    "unitree_go1/assets/hip.stl",
+    "unitree_go1/assets/thigh_mirror.stl",
+    "unitree_go1/assets/calf.stl",
+    "unitree_go1/assets/thigh.stl",
+    "unitree_go1/assets/simple_ball.obj",
+    "unitree_go1/assets/simple_sofa.obj",
     "22_humanoids.xml",
     "adhesion.xml",
     "agility_cassie/assets/achilles-rod.obj",
@@ -593,7 +682,13 @@ export async function downloadExampleScenesFolder(mujoco) {
     "model_with_tendon.xml",
   ];
 
-  let requests = allFiles.map((url) => fetch("./examples/scenes/" + url));
+  console.log("Downloading files to MuJoCo virtual filesystem, including:", allFiles.slice(0, 10));
+
+  let requests = allFiles.map((url) => {
+    console.log("Fetching:", "./examples/scenes/" + url);
+    return fetch("./examples/scenes/" + url);
+  });
+  
   let responses = await Promise.all(requests);
   for (let i = 0; i < responses.length; i++) {
       let split = allFiles[i].split("/");
@@ -604,10 +699,21 @@ export async function downloadExampleScenesFolder(mujoco) {
           working += "/";
       }
 
+      if (allFiles[i] === "living_room.xml") {
+        console.log("Writing living_room.xml to MuJoCo filesystem");
+      }
+
       if (allFiles[i].endsWith(".png") || allFiles[i].endsWith(".stl") || allFiles[i].endsWith(".skn")) {
           mujoco.FS.writeFile("/working/" + allFiles[i], new Uint8Array(await responses[i].arrayBuffer()));
       } else {
           mujoco.FS.writeFile("/working/" + allFiles[i], await responses[i].text());
+      }
+      
+      if (allFiles[i] === "living_room.xml") {
+        console.log("Successfully wrote living_room.xml to MuJoCo filesystem");
+        // Verify it exists
+        let exists = mujoco.FS.analyzePath("/working/living_room.xml").exists;
+        console.log("Verification - living_room.xml exists:", exists);
       }
   }
 }
@@ -653,6 +759,45 @@ export function getQuaternion(buffer, index, target, swizzle = true) {
 /** Converts this Vector3's Handedness to MuJoCo's Coordinate Handedness
  * @param {THREE.Vector3} target */
 export function toMujocoPos(target) { return target.set(target.x, -target.z, target.y); }
+
+/**
+ * Sets the position of a body and updates the parent's position
+ * @param {Object} simulation - MuJoCo simulation object
+ * @param {number} bodyId - ID of the body to update
+ * @param {THREE.Vector3} newPos - New position for the body
+ */
+export function setPositionAndUpdateParent(simulation, bodyId, newPos) {
+  try {
+    if (!simulation || bodyId === undefined) {
+      console.error("Invalid parameters for setPositionAndUpdateParent");
+      return;
+    }
+    
+    // Convert to MuJoCo coordinate system
+    let mjPos = toMujocoPos(newPos.clone());
+    
+    // Try to set the position in qpos if this is a free joint
+    try {
+      if (simulation.model && simulation.model.body_jntadr && simulation.model.jnt_qposadr) {
+        let jntadr = simulation.model.body_jntadr[bodyId];
+        let qposadr = simulation.model.jnt_qposadr[jntadr];
+        
+        if (qposadr !== undefined && simulation.qpos) {
+          simulation.qpos[qposadr + 0] = mjPos.x;
+          simulation.qpos[qposadr + 1] = mjPos.y;
+          simulation.qpos[qposadr + 2] = mjPos.z;
+          
+          // Update simulation state
+          simulation.forward();
+        }
+      }
+    } catch (e) {
+      console.error("Error setting body position:", e);
+    }
+  } catch (e) {
+    console.error("Error in setPositionAndUpdateParent:", e);
+  }
+}
 
 /** Standard normal random number generator using Box-Muller transform */
 export function standardNormal() {
